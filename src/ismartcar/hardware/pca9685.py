@@ -66,11 +66,13 @@ class PCA9685:
         if not (0 <= on <= 4095 and 0 <= off <= 4095):
             raise ValueError("on and off must be 0..4095")
         register = self.LED0_ON_L + channel * 4
-        self._bus.write_i2c_block_data(
-            self.address,
-            register,
-            [on & 0xFF, (on >> 8) & 0x0F, off & 0xFF, (off >> 8) & 0x0F],
-        )
+        # MODE1.AI is not enabled by default (currently MODE1=0x11).
+        # Use explicit register addresses rather than a multi-byte block write.
+        # Write OFF_H last: its full-off bit stays set while counts are loaded.
+        self._bus.write_byte_data(self.address, register, on & 0xFF)
+        self._bus.write_byte_data(self.address, register + 1, (on >> 8) & 0x0F)
+        self._bus.write_byte_data(self.address, register + 2, off & 0xFF)
+        self._bus.write_byte_data(self.address, register + 3, (off >> 8) & 0x0F)
 
     def all_outputs_off(self) -> None:
         """Set full-off for all outputs; only call when ready to change hardware."""
