@@ -1,0 +1,17 @@
+{
+  "device_name": "Gamepad",
+  "deadzone": 0.10,
+  "axes": {
+    "steering":   {"event": "ABS_X",  "invert": false},
+    "throttle":   {"event": "ABS_Y",  "invert": true},
+    "camera_pan": {"event": "ABS_Z",  "invert": false},
+    "camera_tilt":{"event": "ABS_RZ", "invert": true}
+  },
+  "buttons": {
+    "BTN_SOUTH": "center_steering",
+    "BTN_EAST":  "emergency_stop",
+    "BTN_NORTH": "center_camera",
+    "BTN_WEST":  "cycle_speed"
+  },
+  "speed_levels_percent": [30, 60, 100]
+}
