@@ -242,3 +242,22 @@ ASUS-адаптером. При ошибке `Powered` проверьте `rfkil
 Для отключения службы:
 `sudo systemctl disable --now ismartcar-gamepad.service`.
 
+
+### Полная диагностика G910 (без управления моторами)
+
+`config/g910.json` содержит подтверждённые по фактическим событиям контроллера
+коды крестовины `ABS_HAT0X` (−1=лево, +1=право),
+`ABS_HAT0Y` (−1=вверх, +1=вниз), а также
+`BTN_TL`=LB, `BTN_TR`=RB, `BTN_TL2`=LT, `BTN_TR2`=RT,
+`BTN_SELECT` и `BTN_START`.
+Плечевые клавиши и курки в этом режиме передают **цифровые**, не
+аналоговые, события. `EV_KEY=2` — автоповтор удерживаемой кнопки
+и игнорируется. Дополнительные кнопки пока ничего не запускают.
+
+```bash
+cd /home/pi/iSmartCar
+git pull --ff-only
+sudo python3 src/ismartcar/controllers/gamepad_dry_run.py
+```
+
+Dry-run показывает события, не обращаясь к GPIO/I²C и не двигая машину.
