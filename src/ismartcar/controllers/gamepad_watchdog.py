@@ -10,9 +10,13 @@ It takes action ONLY when:
      in which case systemd restarts that daemon; or
   2. BlueZ says G910 is disconnected, but the ASUS controller still shows a
      stale ACL link in TWO checks separated by four seconds. It then performs
-     the exact targeted 'btmgmt ... disconnect' tested on this Raspberry Pi.
+     the targeted 'btmgmt ... disconnect' tested on this Raspberry Pi; or
+  3. BlueZ reports a connected G910 but the ASUS adapter shows NO ACL link
+     in TWO checks separated by four seconds. It requests the device's
+     BlueZ Device1.Disconnect() to clear the phantom connected state.
 
 Missing tools, unexpected adapter IDs, and uncertain states are log-only.
+Never force a Bluetooth disconnect if BlueZ and HCI both show connected.
 """
 
 from __future__ import annotations
@@ -103,6 +107,7 @@ def bluez_status(bus) -> tuple[str | None, bool | None, bool | None]:
 
 
 def clear_stale_acl(bus, dry_run: bool) -> None:
+    """Reconcile BlueZ and kernel HCI states without disturbing healthy links."""
     first_path, first_connected, first_resolved = bluez_status(bus)
     if first_path is None:
         log(f"WATCHDOG: ASUS adapter {ASUS_BLUETOOTH_MAC} missing")
@@ -116,19 +121,55 @@ def clear_stale_acl(bus, dry_run: bool) -> None:
     if first_connected is None or first_acl is None:
         log("WATCHDOG: cannot safely compare G910 state, no cleanup")
         return
-    if first_connected or not first_acl:
+    if first_connected == first_acl:
         log(f"WATCHDOG: G910 BlueZ connected={first_connected}, "
-            f"HID resolved={first_resolved}, HCI ACL={first_acl}; no stale-ACL cleanup")
+            f"HID resolved={first_resolved}, HCI ACL={first_acl}; consistent")
         return
 
-    log(f"WATCHDOG: suspicious G910 state: BlueZ disconnected but ACL on {hci}")
+    # Both mismatch directions occur with this specific G910 and USB-BT400:
+    #   BlueZ=False, ACL=True  -> stale kernel ACL handle
+    #   BlueZ=True, ACL=False  -> phantom BlueZ connected/HID state
+    phantom_bluez = first_connected and not first_acl
+    kind = "phantom BlueZ connection" if phantom_bluez else "stale HCI ACL"
+    log(f"WATCHDOG: suspicious G910 state ({kind}) on {hci}; confirming")
     time.sleep(CONFIRM_DELAY)
 
-    # Recheck both layers to avoid tearing down a normal in-progress reconnect.
+    # Recheck *both* sources; a transition here is a normal reconnect and
+    # must not be interrupted. A four-second confirmation alone does not
+    # prove all mismatches are stale, but avoids resetting transient states.
     second_path, second_connected, _ = bluez_status(bus)
     second_acl = has_acl(hci) if second_path == first_path else None
-    if second_connected is not False or second_acl is not True:
+    if second_connected is not first_connected or second_acl is not first_acl:
         log("WATCHDOG: connection state changed during verification; leave it alone")
+        return
+
+    if phantom_bluez:
+        # Disconnect via the *actual* paired Device1 on the ASUS adapter,
+        # without removing the bond or touching the other Bluetooth adapter.
+        current_adapter, device_path, props = find_objects(bus)
+        if (current_adapter != first_path or not device_path or not props
+                or not bool(props.get("Paired", False))
+                or not bool(props.get("Connected", False))):
+            log("WATCHDOG: G910 state changed before BlueZ cleanup; skipped")
+            return
+        if has_acl(hci) is not False:
+            log("WATCHDOG: ACL changed before BlueZ cleanup; skipped")
+            return
+
+        log(f"WATCHDOG: confirmed phantom BlueZ connection for {G910_MAC}")
+        if dry_run:
+            log(f"DRY-RUN: BlueZ Device1.Disconnect() on {device_path}")
+            return
+
+        try:
+            import dbus
+            device = dbus.Interface(bus.get_object("org.bluez", device_path),
+                                    "org.bluez.Device1")
+            device.Disconnect(timeout=12)
+        except dbus.exceptions.DBusException as exc:
+            log(f"WATCHDOG: BlueZ disconnect failed: {exc}")
+            return
+        log("WATCHDOG: phantom BlueZ connection cleared; reconnect service will retry")
         return
 
     log(f"WATCHDOG: confirmed stale ACL for {G910_MAC} on {hci}; disconnecting")
@@ -136,6 +177,8 @@ def clear_stale_acl(bus, dry_run: bool) -> None:
         log(f"DRY-RUN: btmgmt -i {hci} disconnect -t public {G910_MAC}")
         return
 
+    # The other mismatch direction: kernel still retains an ACL handle,
+    # but BlueZ does not consider this gamepad connected.
     try:
         result = command(
             ["btmgmt", "-i", hci, "disconnect", "-t", "public", G910_MAC],
