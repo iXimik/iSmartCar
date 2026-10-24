@@ -62,6 +62,36 @@ def find_objects(bus: dbus.SystemBus) -> tuple[str | None, str | None, dict | No
     return adapter_path, None, None
 
 
+def scan_bredr(bus: dbus.SystemBus, adapter_path: str, seconds: float = 7.0) -> None:
+    """Briefly scan for the classic-Bluetooth gamepad after failed reconnects.
+
+    The D-Bus connection is kept alive for the entire discovery session.
+    This uses a *separate scan session* and never removes bond/trust data.
+    """
+    adapter = dbus.Interface(bus.get_object(BLUEZ, adapter_path), ADAPTER_IFACE)
+    started = False
+    try:
+        adapter.SetDiscoveryFilter(
+            dbus.Dictionary({"Transport": dbus.String("bredr")}, signature="sv"),
+            timeout=10,
+        )
+        log(f"SCAN: BR/EDR inquiry for {seconds:g}s via ASUS USB-BT400")
+        adapter.StartDiscovery(timeout=10)
+        started = True
+        time.sleep(seconds)
+    finally:
+        if started:
+            try:
+                adapter.StopDiscovery(timeout=10)
+                log("SCAN: finished, continuing normal reconnection")
+            except dbus.exceptions.DBusException as exc:
+                log(f"SCAN: unable to end our discovery session: {exc}")
+        try:
+            adapter.SetDiscoveryFilter(dbus.Dictionary({}, signature="sv"), timeout=10)
+        except dbus.exceptions.DBusException:
+            pass
+
+
 def connect_once(bus: dbus.SystemBus) -> str:
     adapter_path, device_path, properties = find_objects(bus)
     if adapter_path is None:
@@ -104,7 +134,9 @@ def connect_once(bus: dbus.SystemBus) -> str:
 
     log(f"CONNECT: attempting {G910_MAC} via {ASUS_BLUETOOTH_MAC}")
     dbus.Interface(device, DEVICE_IFACE).Connect(timeout=20)
-    log("CONNECTED: G910 via ASUS USB-BT400")
+    # A successful method call does not guarantee that the HID link will stay
+    # connected. The next poll checks Connected again.
+    log("CONNECT: BlueZ accepted request; verifying connection on next poll")
     return "connected"
 
 
@@ -112,41 +144,102 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--once", action="store_true",
-        help="Perform one status/connection attempt and exit (for diagnostics)",
+        help="Try checking/connecting once and show the result, without scanning",
     )
     parser.add_argument(
         "--retry-seconds", type=float, default=8,
         help="Seconds between checks/reconnection attempts (default: 8)",
     )
+    parser.add_argument(
+        "--scan-seconds", type=float, default=7,
+        help="Duration of occasional BR/EDR discovery (default: 7 seconds)",
+    )
     args = parser.parse_args()
-    if args.retry_seconds < 3:
-        parser.error("--retry-seconds must be >= 3")
+    if args.retry_seconds < 3 or not 2 <= args.scan_seconds <= 15:
+        parser.error("retry-seconds >= 3 and 2 <= scan-seconds <= 15 required")
 
     log(
         f"iSmartCar Bluetooth auto-connect ready: ASUS {ASUS_BLUETOOTH_MAC}, "
         f"G910 {G910_MAC}. NO motor control."
     )
-    last_state = None
+
+    # IMPORTANT: keep the same system-bus connection across BR/EDR discovery.
+    # BlueZ ends discovery sessions if their owning D-Bus client disappears.
+    bus = dbus.SystemBus()
+    last_state: str | None = None
+    failures = 0
+    next_scan_after = 0.0
+    last_missing_scan_at = -1e9
+
     try:
         while True:
+            state = "unknown"
+            attempted = False
             try:
-                bus = dbus.SystemBus()
-                state = connect_once(bus)
+                adapter_path, device_path, props = find_objects(bus)
+                if adapter_path is None:
+                    state = "no_adapter"
+                    log("WAIT: ASUS USB-BT400 adapter is absent")
+                elif device_path is None:
+                    state = "no_device"
+                    if not args.once and (
+                        time.monotonic() - last_missing_scan_at >= 40
+                    ):
+                        last_missing_scan_at = time.monotonic()
+                        try:
+                            scan_bredr(bus, adapter_path, args.scan_seconds)
+                        except dbus.exceptions.DBusException as exc:
+                            log(f"SCAN: failed: {exc}")
+                    log("WAIT: paired G910 record not found on ASUS adapter; "
+                        "check pairing via bluetoothctl")
+                elif props is not None and bool(props.get("Connected", False)):
+                    state = "connected"
+                    failures = 0
+                    next_scan_after = 0.0
+                else:
+                    # The user's paired controller may need several seconds
+                    # after waking before it accepts a host-initiated link.
+                    attempted = True
+                    state = connect_once(bus)
+                    if state == "connected":
+                        failures = 0
+                        next_scan_after = 0.0
+                    elif state in ("powered_on", "not_paired"):
+                        failures = 0
             except dbus.exceptions.DBusException as exc:
                 state = "dbus_error"
-                log(f"RETRY: BlueZ D-Bus error: {exc}")
+                if attempted:
+                    failures += 1
+                log(f"RETRY: BlueZ error: {exc}")
             except (OSError, RuntimeError) as exc:
                 state = "error"
+                if attempted:
+                    failures += 1
                 log(f"RETRY: {exc}")
-            else:
-                if state != last_state:
-                    if state == "connected" and last_state != "connected":
-                        log("STATUS: gamepad connected")
-                    elif last_state == "connected":
-                        log("STATUS: gamepad disconnected, reconnecting")
-            last_state = state
+
+            if state != last_state:
+                if state == "connected":
+                    log("STATUS: gamepad connected to ASUS adapter")
+                elif last_state == "connected":
+                    log("STATUS: gamepad disconnected; reconnection enabled")
+                last_state = state
+
             if args.once:
                 return 0 if state == "connected" else 1
+
+            # Several unsuccessful Connect calls can indicate that G910 is in
+            # standby or has just woken up. A bounded BR/EDR inquiry helps
+            # refresh discovery without resetting pairing or the USB adapter.
+            if failures >= 2 and time.monotonic() >= next_scan_after:
+                next_scan_after = time.monotonic() + 45.0
+                failures = 0
+                try:
+                    target_adapter, _, _ = find_objects(bus)
+                    if target_adapter is not None:
+                        scan_bredr(bus, target_adapter, args.scan_seconds)
+                except dbus.exceptions.DBusException as exc:
+                    log(f"SCAN: retry skipped: {exc}")
+
             time.sleep(args.retry_seconds)
     except KeyboardInterrupt:
         log("Stopped by operator")
