@@ -1,17 +1,53 @@
 {
   "device_name": "Gamepad",
-  "deadzone": 0.10,
+  "deadzone": 0.1,
   "axes": {
-    "steering":   {"event": "ABS_X",  "invert": false},
-    "throttle":   {"event": "ABS_Y",  "invert": true},
-    "camera_pan": {"event": "ABS_Z",  "invert": false},
-    "camera_tilt":{"event": "ABS_RZ", "invert": true}
+    "steering": {
+      "event": "ABS_X",
+      "invert": false
+    },
+    "throttle": {
+      "event": "ABS_Y",
+      "invert": true
+    },
+    "camera_pan": {
+      "event": "ABS_Z",
+      "invert": false
+    },
+    "camera_tilt": {
+      "event": "ABS_RZ",
+      "invert": true
+    }
   },
   "buttons": {
     "BTN_SOUTH": "center_steering",
-    "BTN_EAST":  "emergency_stop",
+    "BTN_EAST": "emergency_stop",
     "BTN_NORTH": "center_camera",
-    "BTN_WEST":  "cycle_speed"
+    "BTN_WEST": "cycle_speed"
   },
-  "speed_levels_percent": [30, 60, 100]
+  "speed_levels_percent": [
+    30,
+    60,
+    100
+  ],
+  "hat_axes": {
+    "ABS_HAT0X": {
+      "0": "center",
+      "1": "right",
+      "-1": "left"
+    },
+    "ABS_HAT0Y": {
+      "0": "center",
+      "1": "down",
+      "-1": "up"
+    }
+  },
+  "aux_buttons": {
+    "BTN_TL": "LB",
+    "BTN_TR": "RB",
+    "BTN_TL2": "LT",
+    "BTN_TR2": "RT",
+    "BTN_SELECT": "SELECT",
+    "BTN_START": "START"
+  }
 }
