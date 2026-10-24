@@ -23,7 +23,7 @@ from pathlib import Path
 from evdev import InputDevice, ecodes
 
 # Allow invocation using absolute script path (no package installation).
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from ismartcar.hardware.pca9685 import PCA9685
 
 from gamepad_dry_run import axis_percent, find_device
