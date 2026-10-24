@@ -209,3 +209,36 @@ python3 src/ismartcar/controllers/g910_motor_test.py              # только
 # Только после проверки проводки, питания и фиксации поднятого шасси:
 sudo python3 src/ismartcar/controllers/g910_motor_test.py --arm
 ```
+
+### Автоматическое подключение MOBASE G910 через ASUS USB-BT400
+
+После первичного сопряжения (уже сделано на этой Raspberry Pi) процесс
+`src/ismartcar/controllers/bluetooth_autoconnect.py` использует BlueZ D-Bus
+`org.bluez.Device1.Connect`. Он находит **именно USB-BT400** по адресу
+`5C:F3:70:7F:E0:D4` (встроенный Bluetooth Raspberry Pi не выбирает)
+и переподключает **G910** `05:67:39:43:89:01` при загрузке и после обрыва.
+Он не включает двигатели, PWM, I2C или GPIO. При выключенном геймпаде
+периодически повторяет попытки; включить сам геймпад физически не умеет.
+
+```bash
+cd /home/pi/iSmartCar
+git pull --ff-only
+sudo apt install -y python3-dbus
+sudo /usr/bin/python3 src/ismartcar/controllers/bluetooth_autoconnect.py --once
+# Если геймпад уже подключён и первая проверка прошла успешно:
+sudo cp systemd/ismartcar-gamepad.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ismartcar-gamepad.service
+systemctl status ismartcar-gamepad.service --no-pager
+journalctl -u ismartcar-gamepad.service -n 30 --no-pager
+```
+
+Не требуется заново выполнять `pair`, если G910 остался сопряжён с
+ASUS-адаптером. При ошибке `Powered` проверьте `rfkill list`, при
+необходимости разблокируйте адаптер командой `sudo rfkill unblock bluetooth`.
+Для диагностики после включения геймпада можно выполнить
+`bluetoothctl info 05:67:39:43:89:01` или
+`sudo python3 src/ismartcar/controllers/gamepad_probe.py --list`.
+Для отключения службы:
+`sudo systemctl disable --now ismartcar-gamepad.service`.
+
