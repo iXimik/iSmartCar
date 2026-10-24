@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 
 try:
     import dbus
@@ -31,9 +32,21 @@ DEVICE_IFACE = "org.bluez.Device1"
 ASUS_BLUETOOTH_MAC = "5C:F3:70:7F:E0:D4"
 G910_MAC = "05:67:39:43:89:01"
 
+# A separate systemd timer checks this file every five minutes. It is only
+# a service-liveness heartbeat, not an indication that a controller is online.
+HEARTBEAT_FILE = Path("/run/ismartcar-gamepad.heartbeat")
+
 
 def log(message: str) -> None:
     print(time.strftime("%Y-%m-%d %H:%M:%S"), message, flush=True)
+
+
+def update_heartbeat() -> None:
+    """Mark the auto-connect polling loop as alive for the independent timer."""
+    try:
+        HEARTBEAT_FILE.touch(mode=0o600, exist_ok=True)
+    except OSError as exc:
+        log(f"WATCHDOG: heartbeat could not be updated: {exc}")
 
 
 def find_objects(bus: dbus.SystemBus) -> tuple[str | None, str | None, dict | None]:
@@ -165,6 +178,8 @@ def main() -> int:
 
     # A persistent system bus is required by BlueZ discovery sessions.
     bus = dbus.SystemBus()
+    if not args.once:
+        update_heartbeat()
     last_state: str | None = None
     failure_count = 0
     connected_since: float | None = None
@@ -290,6 +305,8 @@ def main() -> int:
                     failure_count += 1
                 log(f"RETRY: {exc}")
 
+            if not args.once:
+                update_heartbeat()
             time.sleep(args.retry_seconds)
     except KeyboardInterrupt:
         log("Stopped by operator")
