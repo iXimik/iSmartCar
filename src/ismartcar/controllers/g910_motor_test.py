@@ -113,6 +113,7 @@ def main() -> None:
     device = InputDevice(device_path)
     gpio_initialized = False
     pwm: PCA9685 | None = None
+    pwm_shutdown_confirmed = False
     try:
         print(f"Controller: {device.name} ({device_path})", flush=True)
         initial_throttle = get_throttle(device)
@@ -120,15 +121,16 @@ def main() -> None:
             raise RuntimeError(
                 "Left stick not centered at start. Release it and restart."
             )
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BOARD)
-        # Force LOW *as outputs are configured*, before enabling motor power.
-        for pin in DIRECTION_PINS:
-            GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
-        gpio_initialized = True
-
+        # Check that the I2C device ACKs before touching GPIO directions.
+        # A disconnected/unpowered PCA9685 must not initiate any motor wiring changes.
         pwm = PCA9685()
-        status = pwm.status()
+        try:
+            status = pwm.status()
+        except OSError as error:
+            raise RuntimeError(
+                f"PCA9685 at I2C address 0x40 is not responding ({error}). "
+                "Check I2C wiring, shared ground and logic-board power."
+            ) from error
         if not status["sleeping"]:
             raise RuntimeError("PWM chip is awake, refusing to interrupt another process")
         # Refuse if any of the 16 outputs may already be active.
@@ -136,6 +138,13 @@ def main() -> None:
             reg = pwm.LED0_ON_L + 4 * channel + 3
             if not (pwm.read_register(reg) & 0x10):
                 raise RuntimeError(f"PCA9685 CH{channel} was not FULL_OFF")
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BOARD)
+        # Force LOW as each direction pin becomes an output.
+        for pin in DIRECTION_PINS:
+            GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
+        gpio_initialized = True
+
         pwm.all_outputs_off()
         pwm.set_frequency(PWM_HZ)
         motor_stop(GPIO, pwm)
@@ -213,17 +222,32 @@ def main() -> None:
             except Exception as error:
                 print(f"GPIO stop failed: {error}", file=sys.stderr)
         if pwm is not None:
+            off_ok = False
+            sleep_ok = False
             try:
                 pwm.all_outputs_off()
-                pwm.sleep()
+                off_ok = True
             except Exception as error:
-                print(f"PWM stop failed: {error}", file=sys.stderr)
-            finally:
-                pwm.close()
+                print(f"WARNING: PCA9685 PWM off NOT confirmed: {error}",
+                      file=sys.stderr)
+            try:
+                pwm.sleep()
+                sleep_ok = True
+            except Exception as error:
+                print(f"WARNING: PCA9685 sleep NOT confirmed: {error}",
+                      file=sys.stderr)
+            pwm_shutdown_confirmed = off_ok and sleep_ok
+            pwm.close()
         if gpio_initialized:
             GPIO.cleanup(DIRECTION_PINS)
         device.close()
-        print("Motor test finished; STOP commanded, PWM sleeping.", flush=True)
+        if pwm_shutdown_confirmed:
+            print("Motor test finished; PWM full-off and sleep confirmed.",
+                  flush=True)
+        else:
+            print("Motor test finished, but PCA9685 shutdown NOT confirmed. "
+                  "Disconnect motor power physically before troubleshooting.",
+                  flush=True)
 
 
 if __name__ == "__main__":
