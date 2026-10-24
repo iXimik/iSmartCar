@@ -134,17 +134,17 @@ def connect_once(bus: dbus.SystemBus) -> str:
 
     log(f"CONNECT: attempting {G910_MAC} via {ASUS_BLUETOOTH_MAC}")
     dbus.Interface(device, DEVICE_IFACE).Connect(timeout=20)
-    # A successful method call does not guarantee that the HID link will stay
-    # connected. The next poll checks Connected again.
-    log("CONNECT: BlueZ accepted request; verifying connection on next poll")
-    return "connected"
+    # Success here only means BlueZ accepted Connect(), not that a usable
+    # input device was established or the link will stay up.
+    log("CONNECT: BlueZ accepted request; awaiting HID service resolution")
+    return "connecting"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--once", action="store_true",
-        help="Try checking/connecting once and show the result, without scanning",
+        help="Try connection once and verify BlueZ state, without scanning",
     )
     parser.add_argument(
         "--retry-seconds", type=float, default=8,
@@ -163,93 +163,132 @@ def main() -> int:
         f"G910 {G910_MAC}. NO motor control."
     )
 
-    # IMPORTANT: keep the same system-bus connection across BR/EDR discovery.
-    # BlueZ ends discovery sessions if their owning D-Bus client disappears.
+    # A persistent system bus is required by BlueZ discovery sessions.
     bus = dbus.SystemBus()
     last_state: str | None = None
-    failures = 0
+    failure_count = 0
+    connected_since: float | None = None
+    pending_connect = False
     next_scan_after = 0.0
     last_missing_scan_at = -1e9
+    stable_seconds = 20.0
 
     try:
         while True:
             state = "unknown"
+            now = time.monotonic()
             attempted = False
+            adapter_path = None
             try:
                 adapter_path, device_path, props = find_objects(bus)
                 if adapter_path is None:
                     state = "no_adapter"
                     log("WAIT: ASUS USB-BT400 adapter is absent")
+                    connected_since = None
+                    pending_connect = False
                 elif not bool(
                     dbus.Interface(bus.get_object(BLUEZ, adapter_path), PROPERTIES)
                     .Get(ADAPTER_IFACE, "Powered", timeout=10)
                 ):
-                    # Power the chosen USB adapter even if BlueZ has no G910
-                    # device record yet (cold boot or USB re-enumeration).
                     dbus.Interface(bus.get_object(BLUEZ, adapter_path), PROPERTIES).Set(
                         ADAPTER_IFACE, "Powered", dbus.Boolean(True), timeout=10
                     )
                     state = "powered_on"
+                    connected_since = None
+                    pending_connect = False
                     log("POWER: ASUS USB-BT400 enabled")
                 elif device_path is None:
                     state = "no_device"
-                    if not args.once and (
-                        time.monotonic() - last_missing_scan_at >= 40
-                    ):
-                        last_missing_scan_at = time.monotonic()
+                    connected_since = None
+                    pending_connect = False
+                    if not args.once and now - last_missing_scan_at >= 40:
+                        last_missing_scan_at = now
                         try:
                             scan_bredr(bus, adapter_path, args.scan_seconds)
                         except dbus.exceptions.DBusException as exc:
                             log(f"SCAN: failed: {exc}")
-                    log("WAIT: paired G910 record not found on ASUS adapter; "
-                        "check pairing via bluetoothctl")
-                elif props is not None and bool(props.get("Connected", False)):
-                    state = "connected"
-                    failures = 0
-                    next_scan_after = 0.0
+                    log("WAIT: paired G910 record not found on ASUS adapter")
+                elif not bool(props.get("Paired", False)):
+                    state = "not_paired"
+                    connected_since = None
+                    pending_connect = False
+                    log("WAIT: G910 is not paired with ASUS USB-BT400")
+                elif bool(props.get("Connected", False)):
+                    # A successful Connect() reply is NOT a confirmed HID link.
+                    # Re-check BlueZ Device1 on the following poll.
+                    if connected_since is None:
+                        connected_since = now
+                        log("LINK: Bluetooth transport connected; checking HID")
+                    pending_connect = False
+                    if bool(props.get("ServicesResolved", False)):
+                        state = "connected"
+                        if now - connected_since >= stable_seconds:
+                            if failure_count:
+                                log("LINK: HID connection stable; clearing retry count")
+                            failure_count = 0
+                            next_scan_after = 0.0
+                    else:
+                        state = "resolving"
                 else:
-                    # The user's paired controller may need several seconds
-                    # after waking before it accepts a host-initiated link.
-                    attempted = True
-                    state = connect_once(bus)
+                    # Count a failed connection even if Connect() originally
+                    # returned successfully: the controller might have
+                    # disconnected before our next poll.
+                    if pending_connect:
+                        failure_count += 1
+                        pending_connect = False
+                        log(f"LINK: previous connect did not hold "
+                            f"(failures={failure_count})")
+                    if connected_since is not None:
+                        duration = max(0.0, now - connected_since)
+                        if duration < stable_seconds:
+                            failure_count += 1
+                            log(f"LINK: short-lived connection (~{duration:.0f}s); "
+                                f"failures={failure_count}")
+                        connected_since = None
+
+                    # Discover BEFORE attempting another connection, so our
+                    # BR/EDR inquiry won't interfere with a new connect.
+                    if not args.once and failure_count >= 2 and now >= next_scan_after:
+                        next_scan_after = now + 45.0
+                        failure_count = 0
+                        state = "scanning"
+                        scan_bredr(bus, adapter_path, args.scan_seconds)
+                    else:
+                        attempted = True
+                        state = connect_once(bus)
+                        pending_connect = state == "connecting"
+
+                if state != last_state:
                     if state == "connected":
-                        failures = 0
-                        next_scan_after = 0.0
-                    elif state in ("powered_on", "not_paired"):
-                        failures = 0
+                        log("STATUS: BlueZ connected and HID services resolved")
+                    elif last_state in ("connected", "resolving"):
+                        log(f"STATUS: previous HID connection lost (state={state})")
+                    last_state = state
+
+                if args.once:
+                    if state == "connecting":
+                        # Give BlueZ time to resolve HID after Connect().
+                        time.sleep(3)
+                        _, _, check = find_objects(bus)
+                        if check and bool(check.get("Connected", False)) and bool(
+                            check.get("ServicesResolved", False)
+                        ):
+                            log("STATUS: BlueZ connected and HID services resolved")
+                            return 0
+                        log("STATUS: Connect() returned, but HID was not verified")
+                        return 1
+                    return 0 if state == "connected" else 1
+
             except dbus.exceptions.DBusException as exc:
-                state = "dbus_error"
+                last_state = "dbus_error"
                 if attempted:
-                    failures += 1
-                log(f"RETRY: BlueZ error: {exc}")
+                    failure_count += 1
+                log(f"RETRY: BlueZ D-Bus error: {exc}")
             except (OSError, RuntimeError) as exc:
-                state = "error"
+                last_state = "error"
                 if attempted:
-                    failures += 1
+                    failure_count += 1
                 log(f"RETRY: {exc}")
-
-            if state != last_state:
-                if state == "connected":
-                    log("STATUS: gamepad connected to ASUS adapter")
-                elif last_state == "connected":
-                    log("STATUS: gamepad disconnected; reconnection enabled")
-                last_state = state
-
-            if args.once:
-                return 0 if state == "connected" else 1
-
-            # Several unsuccessful Connect calls can indicate that G910 is in
-            # standby or has just woken up. A bounded BR/EDR inquiry helps
-            # refresh discovery without resetting pairing or the USB adapter.
-            if failures >= 2 and time.monotonic() >= next_scan_after:
-                next_scan_after = time.monotonic() + 45.0
-                failures = 0
-                try:
-                    target_adapter, _, _ = find_objects(bus)
-                    if target_adapter is not None:
-                        scan_bredr(bus, target_adapter, args.scan_seconds)
-                except dbus.exceptions.DBusException as exc:
-                    log(f"SCAN: retry skipped: {exc}")
 
             time.sleep(args.retry_seconds)
     except KeyboardInterrupt:
