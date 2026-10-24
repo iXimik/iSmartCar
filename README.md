@@ -366,3 +366,77 @@ python3 -m py_compile src/ismartcar/controllers/bluetooth_autoconnect.py
 sudo systemctl restart ismartcar-gamepad.service
 sudo journalctl -u ismartcar-gamepad.service -f
 ```
+
+### Пятиминутная проверка соединения G910 и процесса (25.10.2026)
+
+**Подтверждённый аппаратный сбой:** при полностью выключенном G910
+`bluetoothctl info 05:67:39:43:89:01` показывал `Connected: no`,
+а `sudo hcitool -i hci1 con` — всё ещё существующую ACL-запись
+`05:67:39:43:89:01`. На работающей Raspberry Pi эту зависшую запись
+успешно убрала **адресная** команда:
+
+```bash
+sudo btmgmt -i hci1 disconnect -t public 05:67:39:43:89:01
+```
+
+По просьбе пользователя добавлен независимый
+`gamepad_watchdog.py` и systemd-таймер с **интервалом 5 минут**.
+Он находит адаптер по MAC ASUS, а не по постоянно зафиксированному `hci1`.
+Каждые пять минут он:
+
+1. Сравнивает `Connected` (BlueZ) и реальное наличие ACL у G910
+   в таблице HCI. **Дважды с интервалом 4 секунды** подтверждает
+   несогласованное состояние `Connected: no` + ACL есть.
+   Только после этого выполняет адресный `btmgmt disconnect`.
+   Пара `pair/trust` остаётся сохранённой.
+2. Проверяет файл heartbeat `/run/ismartcar-gamepad.heartbeat`,
+   который обновляет цикл автоподключения примерно каждые 8 секунд.
+   Если цикл не работал **более 150 секунд** или служба не активна,
+   вызывает `systemctl restart ismartcar-gamepad.service`.
+   Это завершает старый Python-процесс штатно через systemd и запускает новый.
+   Он **не перезапускает** службу при обычном выключении G910.
+3. Не обращается к GPIO, PWM, моторам или сервоприводам.
+
+**Установить таймер на Raspberry Pi** (после `git pull`):
+
+```bash
+cd /home/pi/iSmartCar
+git pull --ff-only
+python3 -m py_compile src/ismartcar/controllers/bluetooth_autoconnect.py src/ismartcar/controllers/gamepad_watchdog.py
+sudo cp systemd/ismartcar-gamepad-watchdog.service systemd/ismartcar-gamepad-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ismartcar-gamepad.service ismartcar-gamepad-watchdog.timer
+sudo systemctl restart ismartcar-gamepad.service
+systemctl list-timers --all | grep ismartcar-gamepad
+```
+
+**Проверка без изменений Bluetooth-соединений:**
+
+```bash
+sudo python3 src/ismartcar/controllers/gamepad_watchdog.py --dry-run
+```
+
+**Запуск одного реального пятиминутного цикла вручную:**
+
+```bash
+sudo systemctl start ismartcar-gamepad-watchdog.service
+sudo journalctl -u ismartcar-gamepad-watchdog.service -n 30 --no-pager
+```
+
+Для наблюдения за таймером:
+
+```bash
+sudo systemctl status ismartcar-gamepad-watchdog.timer --no-pager
+sudo journalctl -u ismartcar-gamepad-watchdog.service -f
+```
+
+Чтобы **намеренно** остановить автоподключение для диагностики,
+сначала остановить таймер (иначе он может перезапустить основную службу):
+`sudo systemctl stop ismartcar-gamepad-watchdog.timer`.
+
+**Ограничение:** без реального обмена с устройством невозможно надёжно
+отличить работающий, но неподвижный геймпад от «фантомного» соединения,
+если *и BlueZ, и HCI* ошибочно показывают его подключённым. Поэтому
+watchdog **не** отключает живое соединение просто из-за отсутствия нажатий
+или неподвижности стиков. 5-минутный контроль не заменяет
+отдельный быстрый failsafe остановки двигателей при потере управления.
