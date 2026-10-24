@@ -1,0 +1,13 @@
+[Unit]
+Description=iSmartCar G910 Bluetooth link health watchdog
+Documentation=https://github.com/iXimik/iSmartCar
+Wants=bluetooth.service
+After=bluetooth.service dbus.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -u /home/pi/iSmartCar/src/ismartcar/controllers/gamepad_watchdog.py
+TimeoutStartSec=65
+NoNewPrivileges=yes
+PrivateTmp=yes
