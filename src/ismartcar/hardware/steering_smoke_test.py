@@ -60,8 +60,20 @@ def main() -> None:
           f"{LEGACY_FREQUENCY_HZ} Hz, max hold {MAX_HOLD_SECONDS}s.")
     if not args.arm:
         print("PREVIEW ONLY. No hardware registers changed.")
-        print("Physical test requires --arm; currently undervoltage 0x50005 "
-              "must be resolved before arming.")
+        try:
+            flags = get_throttle_flags()
+        except (OSError, subprocess.SubprocessError, RuntimeError) as error:
+            print(f"Current power state could not be checked: {error}")
+        else:
+            print(f"Actual Raspberry Pi get_throttled: 0x{flags:X}")
+            if flags & 0x5:
+                print("Current undervoltage or throttling; do not arm.")
+            elif flags & 0x50000:
+                print("Earlier undervoltage/throttling this boot; "
+                      "verify fixed power and cold boot before arming.")
+            elif flags == 0:
+                print("No power warnings since boot, but servo supply "
+                      "and mechanics still need checking.")
         return
 
     # Two-stage protection: check power before opening I2C, then just before PWM.
