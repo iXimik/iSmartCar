@@ -1,0 +1,12 @@
+[Unit]
+Description=Check iSmartCar G910 Bluetooth connection every five minutes
+Documentation=https://github.com/iXimik/iSmartCar
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=ismartcar-gamepad-watchdog.service
+
+[Install]
+WantedBy=timers.target
