@@ -79,6 +79,11 @@ class PCA9685:
         self._bus.write_byte_data(self.address, self.ALL_LED_OFF_L, 0x00)
         self._bus.write_byte_data(self.address, self.ALL_LED_OFF_H, 0x10)
 
+    def sleep(self) -> None:
+        """Stop PWM oscillator. Explicit write; all outputs should be off first."""
+        mode1 = self.read_register(self.MODE1)
+        self._bus.write_byte_data(self.address, self.MODE1, mode1 | self.SLEEP)
+
     def close(self) -> None:
         self._bus.close()
 
