@@ -69,6 +69,15 @@ def main() -> None:
     button_map = {
         getattr(ecodes, code): action for code, action in cfg["buttons"].items()
     }
+    # Extra controls are displayed only: no actuator action assigned yet.
+    aux_button_map = {
+        getattr(ecodes, code): label
+        for code, label in cfg.get("aux_buttons", {}).items()
+    }
+    hat_map = {
+        getattr(ecodes, code): labels
+        for code, labels in cfg.get("hat_axes", {}).items()
+    }
     levels = cfg["speed_levels_percent"]
     level_index = 0
     state = {name: 0 for name in cfg["axes"]}
@@ -78,7 +87,8 @@ def main() -> None:
     try:
         print(f"G910 dry-run: {device.name} at {path}", flush=True)
         print("NO motors, servos, GPIO or I2C are controlled.", flush=True)
-        print("Move sticks or press A/B/X/Y; Ctrl+C to stop.", flush=True)
+        print("Move sticks, D-pad, A/B/X/Y, shoulders, START/SELECT; Ctrl+C to stop.", flush=True)
+        print("D-pad and auxiliary buttons are diagnostic only.", flush=True)
 
         for event in device.read_loop():
             if event.type == ecodes.EV_ABS and event.code in axis_map:
@@ -96,13 +106,28 @@ def main() -> None:
                     f"camera_tilt={state['camera_tilt']:+4d}%",
                     flush=True,
                 )
-            elif event.type == ecodes.EV_KEY and event.value == 1:
+            elif event.type == ecodes.EV_ABS and event.code in hat_map:
+                direction = hat_map[event.code].get(str(event.value), f"raw={event.value}")
+                axis = "X" if event.code == ecodes.ABS_HAT0X else "Y"
+                print(f"D-PAD {axis}: {direction} (diagnostic only)", flush=True)
+            elif event.type == ecodes.EV_KEY:
+                # EV_KEY 2 is an auto-repeat while held, not another press.
+                if event.value == 2:
+                    continue
                 action = button_map.get(event.code)
-                if action == "cycle_speed":
-                    level_index = (level_index + 1) % len(levels)
-                    print(f"BUTTON: speed limit -> {levels[level_index]}% (dry-run)", flush=True)
-                elif action:
-                    print(f"BUTTON: {action} (dry-run)", flush=True)
+                if action and event.value == 1:
+                    if action == "cycle_speed":
+                        level_index = (level_index + 1) % len(levels)
+                        print(
+                            f"BUTTON: speed limit -> {levels[level_index]}% (dry-run)",
+                            flush=True,
+                        )
+                    else:
+                        print(f"BUTTON: {action} (dry-run)", flush=True)
+                elif event.code in aux_button_map and event.value in (0, 1):
+                    label = aux_button_map[event.code]
+                    state_text = "pressed" if event.value == 1 else "released"
+                    print(f"AUX {label}: {state_text} (diagnostic only)", flush=True)
     except KeyboardInterrupt:
         print("\nStopped; no hardware was activated.")
     except OSError as exc:
