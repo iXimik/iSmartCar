@@ -335,3 +335,34 @@ sudo python3 /home/pi/iSmartCar/src/ismartcar/controllers/gamepad_dry_run.py
 
 Служба только восстанавливает Bluetooth; для проверки кнопок используется
 отдельная программа dry-run, которая **не включает** GPIO, I²C, двигатели и сервоприводы.
+
+### Исправление цикла переподключения G910 (25.10.2026)
+
+В журнале обнаружено: BlueZ дважды принимал `Device1.Connect()`
+(00:50:30, 00:50:49), но спустя секунды связь исчезала
+(`bluetoothctl info` показывал `Connected: no`). Ранее служба принимала
+успешный ответ метода за устойчивое подключение и немедленно обнуляла
+счётчик ошибок. Поэтому `SCAN` мог вообще не запускаться при коротких
+потерях соединения.
+
+Исправлено в `bluetooth_autoconnect.py`:
+- ответ `Connect()` теперь считается **запросом подключения**, не
+  подтверждением работающего HID;
+- `STATUS: ... HID services resolved` печатается только при
+  `Connected=True` и `ServicesResolved=True` в новом опросе BlueZ;
+- короткие соединения (менее 20 секунд) и безрезультатные запросы
+  учитываются как неудачи, затем запускается BR/EDR-сканирование;
+- если связь держится более 20 секунд, счётчик ошибок очищается.
+
+Это исправление алгоритма **не доказывает**, что сам геймпад перестанет
+обрывать Bluetooth. Если после обновления связь не удерживается,
+следует проверить `journalctl -u bluetooth.service` и `dmesg`
+для диагностики HID/состояния контроллера; не удалять сопряжение без причины.
+
+```bash
+cd /home/pi/iSmartCar
+git pull --ff-only
+python3 -m py_compile src/ismartcar/controllers/bluetooth_autoconnect.py
+sudo systemctl restart ismartcar-gamepad.service
+sudo journalctl -u ismartcar-gamepad.service -f
+```
