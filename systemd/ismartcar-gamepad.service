@@ -1,0 +1,18 @@
+[Unit]
+Description=iSmartCar G910 auto-connect via ASUS USB-BT400
+Documentation=https://github.com/iXimik/iSmartCar
+Wants=bluetooth.service
+After=bluetooth.service dbus.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 -u /home/pi/iSmartCar/src/ismartcar/controllers/bluetooth_autoconnect.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
