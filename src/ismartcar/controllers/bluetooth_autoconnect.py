@@ -180,6 +180,17 @@ def main() -> int:
                 if adapter_path is None:
                     state = "no_adapter"
                     log("WAIT: ASUS USB-BT400 adapter is absent")
+                elif not bool(
+                    dbus.Interface(bus.get_object(BLUEZ, adapter_path), PROPERTIES)
+                    .Get(ADAPTER_IFACE, "Powered", timeout=10)
+                ):
+                    # Power the chosen USB adapter even if BlueZ has no G910
+                    # device record yet (cold boot or USB re-enumeration).
+                    dbus.Interface(bus.get_object(BLUEZ, adapter_path), PROPERTIES).Set(
+                        ADAPTER_IFACE, "Powered", dbus.Boolean(True), timeout=10
+                    )
+                    state = "powered_on"
+                    log("POWER: ASUS USB-BT400 enabled")
                 elif device_path is None:
                     state = "no_device"
                     if not args.once and (
