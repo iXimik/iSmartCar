@@ -133,7 +133,7 @@ def input_test(device_path: str) -> None:
                         print("INPUT TEST: B pressed; exiting", flush=True)
                         return
         except KeyboardInterrupt:
-            print("\\nINPUT TEST: Ctrl+C", flush=True)
+            print("\nINPUT TEST: Ctrl+C", flush=True)
 
 
 def main() -> None:
