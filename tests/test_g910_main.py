@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] /
                        "src" / "ismartcar" / "controllers"))
 
 from g910_main import (
-    SERVOS, servo_counts, traction_command, stop_traction, write_traction,
+    SERVOS, servo_counts, servo_selected, traction_command, stop_traction, write_traction,
 )
 
 
@@ -83,6 +83,15 @@ class MainControllerMappingTests(unittest.TestCase):
             "while time.monotonic() < session_deadline:", 1
         )[0]
         self.assertNotIn("pwm.write_pwm(", startup)
+
+    def test_isolated_servo_filter_only_allows_selected_channel(self):
+        for selected in SERVOS:
+            enabled = [name for name in SERVOS if servo_selected(name, selected)]
+            self.assertEqual(enabled, [selected])
+        self.assertEqual(
+            [name for name in SERVOS if servo_selected(name, None)],
+            list(SERVOS),
+        )
 
     def test_servo_is_bounded_single_channel_pulse(self):
         import g910_main
