@@ -82,11 +82,22 @@ def main() -> None:
     parser.add_argument("--arm", action="store_true",
                         help="Enable one-pulse traction test; wheels must be lifted")
     parser.add_argument("--device", help="Override automatic Gamepad device discovery")
+    parser.add_argument(
+        "--accept-undervoltage", action="store_true",
+        help="EXPERIMENTAL supervised bench test despite live Pi undervoltage; "
+             "requires --arm, lifted wheels and physical motor-power cutoff",
+    )
     args = parser.parse_args()
+    if args.accept_undervoltage and not args.arm:
+        parser.error("--accept-undervoltage requires --arm")
+    # If the operator explicitly accepts the brownout risk, keep the
+    # experimental session very brief. This does not remove the normal guard.
+    pulse_seconds = 0.25 if args.accept_undervoltage else PULSE_SECONDS
+    max_session_seconds = 25 if args.accept_undervoltage else MAX_SESSION_SECONDS
 
     print("SunFounder G910 motor test: BOARD GPIO 11/12/13/15, "
           "PCA9685 CH4/CH5 @ 60 Hz.", flush=True)
-    print(f"Max {MAX_DUTY_PERCENT}% PWM, pulse <= {PULSE_SECONDS:.1f}s; "
+    print(f"Max {MAX_DUTY_PERCENT}% PWM, pulse <= {pulse_seconds:.2f}s; "
           "A = hold to trigger, B = emergency stop.", flush=True)
 
     if not args.arm:
@@ -99,10 +110,16 @@ def main() -> None:
         raise RuntimeError("Cannot verify Raspberry Pi power status")
     print(f"Power status: 0x{flags:X}", flush=True)
     if flags & 0x5:
-        raise RuntimeError(
-            "Current Pi undervoltage/throttling detected; refusing motion. "
-            "Run with the working regulated 5V supply, not a brownout."
-        )
+        if not args.accept_undervoltage:
+            raise RuntimeError(
+                "Current Pi undervoltage/throttling detected; refusing motion. "
+                "Use a stable regulated Pi power supply, or the explicit "
+                "--accept-undervoltage bench-test override."
+            )
+        print("WARNING: Pi reports current undervoltage/throttling. "
+              "Experimental 0.25s pulses only! Wheels raised; "
+              "motor battery disconnect MUST be immediately accessible. "
+              "Pi reboot can leave motor outputs energized.", flush=True)
     if flags & 0x50000:
         print("Note: power problems occurred earlier this boot.", flush=True)
 
@@ -156,7 +173,7 @@ def main() -> None:
         a_pressed = False
         fired_this_press = False
         running_until = 0.0
-        session_end = time.monotonic() + MAX_SESSION_SECONDS
+        session_end = time.monotonic() + max_session_seconds
         while time.monotonic() < session_end:
             now = time.monotonic()
             if running_until and now >= running_until:
@@ -196,7 +213,7 @@ def main() -> None:
             if a_pressed and not fired_this_press and abs(throttle) >= MIN_THROTTLE_PERCENT:
                 fired_this_press = True
                 fresh_flags = get_power_flags()
-                if fresh_flags is None or fresh_flags & 0x5:
+                if fresh_flags is None or (fresh_flags & 0x5 and not args.accept_undervoltage):
                     print(f"BLOCKED: power status {fresh_flags}, no motor command.",
                           flush=True)
                     continue
@@ -206,10 +223,10 @@ def main() -> None:
                 for channel in PWM_CHANNELS:
                     pwm.write_pwm(channel, 0, duty)
                 set_motor_direction(GPIO, forward=throttle > 0)
-                running_until = time.monotonic() + PULSE_SECONDS
+                running_until = time.monotonic() + pulse_seconds
                 label = "forward" if throttle > 0 else "reverse"
                 print(f"PULSE {label}: {MAX_DUTY_PERCENT}% PWM for max "
-                      f"{PULSE_SECONDS:.1f}s", flush=True)
+                      f"{pulse_seconds:.2f}s", flush=True)
         print("STOP: test session time limit reached", flush=True)
     except KeyboardInterrupt:
         print("\nSTOP: Ctrl+C", flush=True)
