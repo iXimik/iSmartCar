@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -98,9 +97,12 @@ def set_motor_direction(gpio, direction: str) -> None:
 
 
 def stop_motors(gpio, pwm: PCA9685) -> None:
-    # Disable directional inputs before disabling motor PWM outputs.
-    gpio.output(MOTOR_GPIO_BOARD, gpio.LOW)
-    pwm.all_outputs_off()
+    # Attempt PWM OFF even if writing direction LOW fails. Both checks are
+    # still software-only; a physical power disconnect remains required.
+    try:
+        gpio.output(MOTOR_GPIO_BOARD, gpio.LOW)
+    finally:
+        pwm.all_outputs_off()
 
 
 def motor_sequence(pwm: PCA9685, gpio, duration: float) -> None:
