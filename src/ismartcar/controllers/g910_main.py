@@ -272,8 +272,11 @@ def main() -> int:
                         gate.cancel_on_disconnect()
                         input_desync = True
                         break
-                    # Any real event (including A key repeat) proves input stream alive.
-                    if event.type != ecodes.EV_SYN:
+                    # Kernel-generated EV_KEY=2 auto-repeat may continue even
+                    # when the physical Bluetooth link has stopped. It MUST
+                    # NOT refresh the drive input watchdog.
+                    if (event.type == ecodes.EV_ABS or
+                            (event.type == ecodes.EV_KEY and event.value in (0, 1))):
                         last_event = time.monotonic()
                     if event.type == ecodes.EV_ABS and event.code in axis_specs:
                         name, invert = axis_specs[event.code]
@@ -382,7 +385,13 @@ def main() -> int:
                         gate.cancel_on_disconnect()
                         print("STOP: direction reversal; release A to re-arm", flush=True)
                     elif active_drive != desired:
-                        write_traction(gpio, pwm, direction, duty)
+                        if active_drive is None:
+                            write_traction(gpio, pwm, direction, duty)
+                        else:
+                            # Same direction: update enable duty without
+                            # bouncing motor direction GPIO on each axis event.
+                            for ch in MOTOR_PWM:
+                                pwm.write_pwm(ch, 0, duty)
                         active_drive = desired
                         print(f"DRIVE: {direction} PWM={duty}", flush=True)
 
