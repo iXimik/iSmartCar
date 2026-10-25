@@ -90,7 +90,8 @@ def pulse_direction(throttle_percent: int, button_value: int) -> str | None:
 
 def input_test(device_path: str) -> None:
     """Input-only diagnostic: NO GPIO, PWM, I2C or motor power changes."""
-    with InputDevice(device_path) as device:
+    device = InputDevice(device_path)
+    try:
         info = device.absinfo(ecodes.ABS_Y)
         if info is None:
             raise RuntimeError("Gamepad has no ABS_Y throttle axis")
@@ -134,6 +135,8 @@ def input_test(device_path: str) -> None:
                         return
         except KeyboardInterrupt:
             print("\nINPUT TEST: Ctrl+C", flush=True)
+    finally:
+        device.close()
 
 
 def main() -> None:
