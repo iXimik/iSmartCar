@@ -77,17 +77,85 @@ def get_throttle(device: InputDevice) -> int:
     return axis_percent(info.value, info.min, info.max, 0.10, True)
 
 
+def pulse_direction(throttle_percent: int, button_value: int) -> str | None:
+    """A NEW A-down event with stick already deflected requests one pulse.
+
+    Auto-repeat (EV_KEY=2), release (0), and neutral stick are never
+    considered motor-start requests.
+    """
+    if button_value != 1 or abs(throttle_percent) < MIN_THROTTLE_PERCENT:
+        return None
+    return "forward" if throttle_percent > 0 else "reverse"
+
+
+def input_test(device_path: str) -> None:
+    """Input-only diagnostic: NO GPIO, PWM, I2C or motor power changes."""
+    with InputDevice(device_path) as device:
+        info = device.absinfo(ecodes.ABS_Y)
+        if info is None:
+            raise RuntimeError("Gamepad has no ABS_Y throttle axis")
+        throttle = get_throttle(device)
+        print(f"INPUT TEST ONLY: {device.name} ({device_path}). NO MOTOR OUTPUTS.", flush=True)
+        print(f"Initial left-stick throttle: {throttle:+d}%. "
+              "Move stick UP first, then press A; B exits.", flush=True)
+        print(f"Start condition: |throttle| >= {MIN_THROTTLE_PERCENT}% and "
+              "NEW BTN_SOUTH=1. BTN_SOUTH=2 is key auto-repeat.", flush=True)
+        try:
+            while True:
+                readable, _, _ = select.select([device], [], [], 0.2)
+                if not readable:
+                    continue
+                for event in device.read():
+                    if event.type == ecodes.EV_ABS and event.code == ecodes.ABS_Y:
+                        new_throttle = axis_percent(
+                            event.value, info.min, info.max, 0.10, True
+                        )
+                        if (abs(new_throttle) >= MIN_THROTTLE_PERCENT) != (
+                            abs(throttle) >= MIN_THROTTLE_PERCENT
+                        ) or (new_throttle > 0) != (throttle > 0):
+                            label = "ready for A" if abs(new_throttle) >= MIN_THROTTLE_PERCENT else "neutral; A blocked"
+                            print(f"STICK: throttle={new_throttle:+d}% ({label})", flush=True)
+                        throttle = new_throttle
+                    elif event.type == ecodes.EV_KEY and event.code == ecodes.BTN_SOUTH:
+                        if event.value == 1:
+                            direction = pulse_direction(throttle, event.value)
+                            if direction:
+                                print(f"WOULD PULSE {direction}: A=1, "
+                                      f"throttle={throttle:+d}% (NO OUTPUT)", flush=True)
+                            else:
+                                print(f"BLOCKED A: throttle={throttle:+d}%; "
+                                      "move stick first, release A, press again", flush=True)
+                        elif event.value == 0:
+                            print("A released", flush=True)
+                        # EV_KEY=2 denotes button repeat, not a new A press.
+                    elif (event.type == ecodes.EV_KEY and
+                          event.code == ecodes.BTN_EAST and event.value == 1):
+                        print("INPUT TEST: B pressed; exiting", flush=True)
+                        return
+        except KeyboardInterrupt:
+            print("\\nINPUT TEST: Ctrl+C", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm", action="store_true",
                         help="Enable one-pulse traction test; wheels must be lifted")
     parser.add_argument("--device", help="Override automatic Gamepad device discovery")
     parser.add_argument(
+        "--input-test", action="store_true",
+        help="Verify A + left-stick motor-start conditions with NO GPIO/I2C writes",
+    )
+    parser.add_argument(
         "--accept-undervoltage", action="store_true",
         help="EXPERIMENTAL supervised bench test despite live Pi undervoltage; "
              "requires --arm, lifted wheels and physical motor-power cutoff",
     )
     args = parser.parse_args()
+    if args.input_test and (args.arm or args.accept_undervoltage):
+        parser.error("--input-test cannot be combined with --arm or --accept-undervoltage")
+    if args.input_test:
+        input_test(args.device or find_device("Gamepad"))
+        return
     if args.accept_undervoltage and not args.arm:
         parser.error("--accept-undervoltage requires --arm")
     # If the operator explicitly accepts the brownout risk, keep the
@@ -166,12 +234,11 @@ def main() -> None:
         pwm.set_frequency(PWM_HZ)
         motor_stop(GPIO, pwm)
 
-        print("READY (wheels MUST be in the air): move LEFT stick up/down, "
-              "hold A to make one short pulse; release A to reset. "
+        print("READY (wheels MUST be in the air): move LEFT stick up/down FIRST, "
+              "then press and hold A for one pulse; release A before next. "
               "B = STOP and EXIT; Ctrl+C = stop.", flush=True)
         throttle = 0
         a_pressed = False
-        fired_this_press = False
         running_until = 0.0
         session_end = time.monotonic() + max_session_seconds
         while time.monotonic() < session_end:
@@ -181,6 +248,7 @@ def main() -> None:
                 running_until = 0.0
                 print("STOP: pulse complete", flush=True)
 
+            pending_direction = None
             readable, _, _ = select.select([device], [], [], 0.02)
             if readable:
                 for event in device.read():
@@ -197,35 +265,48 @@ def main() -> None:
                             running_until = 0.0
                             print("STOP: stick centered/direction changed", flush=True)
                     elif event.type == ecodes.EV_KEY and event.code == ecodes.BTN_SOUTH:
-                        a_pressed = event.value != 0
-                        if not a_pressed:
-                            fired_this_press = False
+                        if event.value == 1:
+                            # Fresh press only; do not arm on key auto-repeat.
+                            a_pressed = True
+                            label = pulse_direction(throttle, event.value)
+                            if label is None:
+                                print(f"BLOCKED A: throttle={throttle:+d}% "
+                                      f"(need |throttle| >= {MIN_THROTTLE_PERCENT}% "
+                                      "BEFORE pressing A)", flush=True)
+                            elif not running_until:
+                                pending_direction = label
+                                print(f"REQUEST: {label} throttle={throttle:+d}% "
+                                      "(checking power before PWM)", flush=True)
+                        elif event.value == 0:
+                            a_pressed = False
                             if running_until:
                                 motor_stop(GPIO, pwm)
                                 running_until = 0.0
                                 print("STOP: A released", flush=True)
+                        # EV_KEY=2 is key auto-repeat and must never arm motors.
                     elif event.type == ecodes.EV_KEY and event.code == ecodes.BTN_EAST:
                         if event.value == 1:
                             print("STOP: B pressed; ending test", flush=True)
                             return
 
-            # Arming requires a *fresh* A button press. One pulse per press.
-            if a_pressed and not fired_this_press and abs(throttle) >= MIN_THROTTLE_PERCENT:
-                fired_this_press = True
+            # Require a fresh A-down edge with throttle already deflected.
+            # The button must still be held after processing this event batch.
+            if pending_direction is not None and a_pressed and not running_until and (
+                abs(throttle) >= MIN_THROTTLE_PERCENT
+            ):
                 fresh_flags = get_power_flags()
                 if fresh_flags is None or (fresh_flags & 0x5 and not args.accept_undervoltage):
                     print(f"BLOCKED: power status {fresh_flags}, no motor command.",
                           flush=True)
                     continue
-                active_direction = throttle
+                active_direction = 1 if pending_direction == "forward" else -1
                 duty = round(4095 * MAX_DUTY_PERCENT / 100)
                 # PWM prepared while all direction inputs are still LOW.
                 for channel in PWM_CHANNELS:
                     pwm.write_pwm(channel, 0, duty)
-                set_motor_direction(GPIO, forward=throttle > 0)
+                set_motor_direction(GPIO, forward=pending_direction == "forward")
                 running_until = time.monotonic() + pulse_seconds
-                label = "forward" if throttle > 0 else "reverse"
-                print(f"PULSE {label}: {MAX_DUTY_PERCENT}% PWM for max "
+                print(f"PULSE {pending_direction}: {MAX_DUTY_PERCENT}% PWM for max "
                       f"{pulse_seconds:.2f}s", flush=True)
         print("STOP: test session time limit reached", flush=True)
     except KeyboardInterrupt:
