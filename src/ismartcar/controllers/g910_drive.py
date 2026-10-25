@@ -177,6 +177,7 @@ def main() -> int:
 
             readable, _, _ = select.select([device], [], [], POLL_SECONDS)
             if readable:
+                lost_input = False
                 try:
                     batch = device.read()
                 except OSError as exc:
@@ -188,9 +189,12 @@ def main() -> int:
                             event.code == ecodes.SYN_DROPPED):
                         print("INPUT DESYNC: stopping; restart test", flush=True)
                         gate.cancel_on_disconnect()
+                        lost_input = True
                         break
                     gate.observe(event.type, event.code, event.value,
                                  time.monotonic(), axis.min, axis.max)
+                if lost_input:
+                    break
                 if gate.emergency:
                     print("STOP: B pressed; test ended", flush=True)
                     break
