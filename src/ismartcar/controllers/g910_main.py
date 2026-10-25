@@ -65,6 +65,11 @@ POWER_CHECK_INTERVAL = 1.0
 LOCKFILE = "/run/lock/ismartcar-actuators.lock"
 
 
+def servo_selected(name: str, servo_filter: str | None) -> bool:
+    """Choose one actuator for cautious, isolated servo bench checks."""
+    return servo_filter is None or name == servo_filter
+
+
 def servo_counts(name: str, percent: int) -> int:
     """Conservative channel positions; pure function."""
     _, centre, travel = SERVOS[name]
@@ -121,6 +126,10 @@ def main() -> int:
                         help="Confirm independent PHYSICAL failsafe/cutoff installed and tested")
     parser.add_argument("--accept-undervoltage", action="store_true",
                         help="Risky lifted-wheel bench override; never works with --drive")
+    parser.add_argument(
+        "--servo-filter", choices=tuple(SERVOS),
+        help="Enable ONLY one servo output for isolated --servos-only checks",
+    )
     parser.add_argument("--device", help="Optional /dev/input/eventX override")
     args = parser.parse_args()
 
@@ -134,6 +143,8 @@ def main() -> int:
         parser.error("--drive requires --hardware-cutoff-confirmed")
     if args.hardware_cutoff_confirmed and not args.drive:
         parser.error("--hardware-cutoff-confirmed is only valid with --drive")
+    if args.servo_filter and not args.servos_only:
+        parser.error("--servo-filter requires --servos-only")
 
     config = json.loads(CONFIG.read_text(encoding="utf-8"))
     deadzone = float(config["deadzone"])
@@ -150,6 +161,10 @@ def main() -> int:
     print("LEFT: steer + throttle | RIGHT: camera pan + tilt", flush=True)
     print("A: motor deadman/short pulse | B: emergency STOP | "
           "X: centre steering | Y: centre camera", flush=True)
+    if args.servo_filter:
+        print(f"ISOLATED SERVO: only {args.servo_filter} "
+              f"(CH{SERVOS[args.servo_filter][0]}); other channels disabled.",
+              flush=True)
     if not args.arm:
         print("DRY RUN ONLY: absolutely no I2C/GPIO output.", flush=True)
     else:
@@ -332,6 +347,8 @@ def main() -> int:
             # servos at once and never issue any startup centering commands.
             if axis_dirty and now - last_servo_update >= SERVO_INTERVAL:
                 for name, (ch, _, _) in SERVOS.items():
+                    if not servo_selected(name, args.servo_filter):
+                        continue
                     target = servo_counts(name, axes[name])
                     if last_pwm[name] != target:
                         if args.arm:
