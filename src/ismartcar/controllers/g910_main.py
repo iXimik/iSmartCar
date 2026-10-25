@@ -59,6 +59,7 @@ PULSE_LOW_VOLTAGE = 0.20
 SESSION_SECONDS = 75.0
 INPUT_TIMEOUT = 0.65  # Stop continuous drive without fresh gamepad events.
 SERVO_INTERVAL = 0.04
+SERVO_PULSE_SECONDS = 0.18  # Short one-at-a-time positioning pulses, no continuous holding
 POLL_INTERVAL = 0.015
 POWER_CHECK_INTERVAL = 1.0
 LOCKFILE = "/run/lock/ismartcar-actuators.lock"
@@ -215,15 +216,19 @@ def main() -> int:
                     gpio.setup(pin, gpio.OUT, initial=gpio.LOW)
                 gpio_ready = True
             pwm.set_frequency(PWM_HZ)
-            # Bring all servos to known, previously bench-tested centre positions.
-            for name, (ch, _, _) in SERVOS.items():
-                pwm.write_pwm(ch, 0, servo_counts(name, 0))
-                time.sleep(0.08)
+            # CRITICAL: NEVER move servos on initialisation. Previous version
+            # held all 3 channels continuously, causing extreme travel and
+            # apparent Pi/Bluetooth power faults on actual hardware.
+            print("SAFE START: servo PWM outputs remain OFF until explicit "
+                  "gamepad stick/X/Y events.", flush=True)
 
         gate = Gesture()
         last_pwm = {name: servo_counts(name, 0) for name in SERVOS}
         axis_dirty = False
         last_servo_update = 0.0
+        pending_servos: dict[str, int] = {}
+        active_servo_channel: int | None = None
+        active_servo_until = 0.0
         active_drive = None
         running_until = 0.0
         last_event = time.monotonic()
@@ -242,6 +247,14 @@ def main() -> int:
                 running_until = 0.0
                 active_drive = None
                 print("STOP: motor pulse ended", flush=True)
+
+            if active_servo_channel is not None and now >= active_servo_until:
+                # Disable the servo channel, not just the driving motor.
+                # A stuck servo can otherwise draw current indefinitely.
+                pwm.write_pwm(active_servo_channel, 0, 0)
+                print(f"SERVO CH{active_servo_channel}: PWM OFF after "
+                      f"{SERVO_PULSE_SECONDS:.2f}s", flush=True)
+                active_servo_channel = None
 
             if (args.drive and active_drive and now - last_event > INPUT_TIMEOUT):
                 stop_traction(gpio, pwm)
@@ -315,25 +328,24 @@ def main() -> int:
                     print("STOP: A released or throttle neutral", flush=True)
                 gate.abort_pulse = False
 
-            # Camera and steering are independent of the traction deadman.
-            # Defer servo I2C writes during short traction pulses to keep the
-            # 0.20s motor pulse stop deadline tight.
-            if (axis_dirty and not (args.motor_pulses and active_drive) and
-                    now - last_servo_update >= SERVO_INTERVAL):
+            # Servo targets are QUEUED, not held. Never energize multiple
+            # servos at once and never issue any startup centering commands.
+            if axis_dirty and now - last_servo_update >= SERVO_INTERVAL:
                 for name, (ch, _, _) in SERVOS.items():
                     target = servo_counts(name, axes[name])
                     if last_pwm[name] != target:
                         if args.arm:
-                            pwm.write_pwm(ch, 0, target)
-                        print(f"SERVO CH{ch} {name}: {target}"
-                              f"{'' if args.arm else ' (PREVIEW)'}", flush=True)
+                            pending_servos[name] = target
+                        else:
+                            print(f"SERVO CH{ch} {name}: {target} (PREVIEW)",
+                                  flush=True)
                         last_pwm[name] = target
                 last_servo_update = now
                 axis_dirty = False
 
             if args.motor_pulses or not args.arm:
                 # Preview mode uses pulse-style A gating and never energizes motors.
-                if not active_drive:
+                if not active_drive and active_servo_channel is None:
                     direction = gate.request(now)
                     if direction is not None:
                         if args.arm and gpio_ready:
@@ -394,6 +406,20 @@ def main() -> int:
                                 pwm.write_pwm(ch, 0, duty)
                         active_drive = desired
                         print(f"DRIVE: {direction} PWM={duty}", flush=True)
+
+            # One servo at a time, never during active motor traction. We
+            # allow at most 0.18s of PWM for each requested position; no
+            # servo is continuously powered while awaiting joystick input.
+            if (args.arm and active_servo_channel is None and
+                    active_drive is None and pending_servos):
+                name = next(iter(pending_servos))
+                target = pending_servos.pop(name)
+                ch = SERVOS[name][0]
+                pwm.write_pwm(ch, 0, target)
+                active_servo_channel = ch
+                active_servo_until = time.monotonic() + SERVO_PULSE_SECONDS
+                print(f"SERVO CH{ch} {name}: PWM={target}, brief pulse",
+                      flush=True)
 
         print("Main controller session ended.", flush=True)
         return 0
