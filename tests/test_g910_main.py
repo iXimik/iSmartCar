@@ -73,5 +73,23 @@ class MainControllerMappingTests(unittest.TestCase):
         self.assertEqual(gpio.calls[-1], ((11, 12, 13, 15), (0, 1, 0, 1)))
 
 
+    def test_no_servo_commands_during_main_initialization(self):
+        # Regression for the first real-hardware failure: the old version
+        # energized CH0, CH14, CH15 simultaneously before READY.
+        import inspect
+        import g910_main
+
+        startup = inspect.getsource(g910_main.main).split(
+            "while time.monotonic() < session_deadline:", 1
+        )[0]
+        self.assertNotIn("pwm.write_pwm(", startup)
+
+    def test_servo_is_bounded_single_channel_pulse(self):
+        import g910_main
+
+        self.assertLessEqual(g910_main.SERVO_PULSE_SECONDS, 0.2)
+        self.assertGreater(g910_main.SERVO_PULSE_SECONDS, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
