@@ -20,7 +20,10 @@ import subprocess
 import sys
 import time
 
-from pca9685 import PCA9685
+try:
+    from .pca9685 import PCA9685  # Imported as part of ismartcar.hardware
+except ImportError:
+    from pca9685 import PCA9685  # Invoked directly as a script
 
 PCA_ADDRESS = 0x40
 PWM_HZ = 60
