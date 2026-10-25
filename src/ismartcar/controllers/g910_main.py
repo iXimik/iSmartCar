@@ -260,6 +260,7 @@ def main() -> int:
 
             readable, _, _ = select.select([device], [], [], POLL_INTERVAL)
             if readable:
+                input_desync = False
                 try:
                     batch = device.read()
                 except OSError as exc:
@@ -269,6 +270,7 @@ def main() -> int:
                     if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_DROPPED:
                         print("STOP: gamepad event desynchronization", flush=True)
                         gate.cancel_on_disconnect()
+                        input_desync = True
                         break
                     # Any real event (including A key repeat) proves input stream alive.
                     if event.type != ecodes.EV_SYN:
@@ -297,10 +299,9 @@ def main() -> int:
                             axes["camera_pan"] = axes["camera_tilt"] = 0
                             axis_dirty = True
                             print("CENTER: camera", flush=True)
-                else:
-                    # Loop exhausted normally (no SYN_DROPPED).
-                    pass
-                if gate.emergency or gate.abort_pulse and gate.emergency:
+                if input_desync:
+                    break
+                if gate.emergency:
                     print("STOP: B pressed (emergency)", flush=True)
                     break
                 if gate.abort_pulse and active_drive is not None:
@@ -312,7 +313,10 @@ def main() -> int:
                 gate.abort_pulse = False
 
             # Camera and steering are independent of the traction deadman.
-            if axis_dirty and now - last_servo_update >= SERVO_INTERVAL:
+            # Defer servo I2C writes during short traction pulses to keep the
+            # 0.20s motor pulse stop deadline tight.
+            if (axis_dirty and not (args.motor_pulses and active_drive) and
+                    now - last_servo_update >= SERVO_INTERVAL):
                 for name, (ch, _, _) in SERVOS.items():
                     target = servo_counts(name, axes[name])
                     if last_pwm[name] != target:
@@ -370,7 +374,14 @@ def main() -> int:
                         print("STOP: motor deadman", flush=True)
                 else:
                     direction, duty = desired
-                    if active_drive != desired:
+                    if active_drive and direction != active_drive[0]:
+                        # Never reverse direction under a held A: stop and
+                        # require a NEW A press after a deliberate release.
+                        stop_traction(gpio, pwm)
+                        active_drive = None
+                        gate.cancel_on_disconnect()
+                        print("STOP: direction reversal; release A to re-arm", flush=True)
+                    elif active_drive != desired:
                         write_traction(gpio, pwm, direction, duty)
                         active_drive = desired
                         print(f"DRIVE: {direction} PWM={duty}", flush=True)
